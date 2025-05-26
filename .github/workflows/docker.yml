@@ -1,37 +1,96 @@
-name: Build and Push Docker Image with Semantic Tags
+name: Semantic Docker Build and Push
 
 on:
   push:
-    tags:
-      - 'v*.*.*'
+    branches: [ main, master ]
+
+env:
+  REGISTRY: docker.io
+  IMAGE_NAME: jyothiram266/doc-semver
 
 jobs:
-  docker:
+  semantic-version:
     runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.semantic.outputs.new_release_version }}
+      changelog: ${{ steps.semantic.outputs.new_release_notes }}
+      released: ${{ steps.semantic.outputs.new_release_published }}
+    
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Semantic Release
+        uses: cycjimmy/semantic-release-action@v4
+        id: semantic
+        with:
+          dry_run: true
+          semantic_version: 19
+        env:
+          TOKEN: ${{ secrets.TOKEN }}
+
+  build-and-push:
+    needs: semantic-version
+    runs-on: ubuntu-latest
+    if: needs.semantic-version.outputs.released == 'true' || github.event_name == 'pull_request'
+    
+    permissions:
+      contents: read
+      packages: write
 
     steps:
-      - uses: actions/checkout@v3
+      - name: Checkout
+        uses: actions/checkout@v4
 
-      - name: Extract SemVer
-        run: |
-          VERSION="${GITHUB_REF#refs/tags/v}"
-          echo "VERSION=$VERSION" >> $GITHUB_ENV
-          echo "MINOR=${VERSION%.*}" >> $GITHUB_ENV
-          echo "MAJOR=${VERSION%%.*}" >> $GITHUB_ENV
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
 
-      - name: Docker Login
-        run: echo "${{ secrets.DOCKER_PASSWORD }}" | docker login -u "${{ secrets.DOCKER_USERNAME }}" --password-stdin
+      - name: Log in to Docker Hub
+        uses: docker/login-action@v3
+        with:
+          username: ${{ secrets.DOCKER_USERNAME }}
+          password: ${{ secrets.DOCKER_PASSWORD }}
 
-      - name: Build and Push Docker Image
+      - name: Extract metadata
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
+          tags: |
+            type=ref,event=branch
+            type=ref,event=pr
+            type=semver,pattern={{version}},value=${{ needs.semantic-version.outputs.version }}
+            type=semver,pattern={{major}}.{{minor}},value=${{ needs.semantic-version.outputs.version }}
+            type=semver,pattern={{major}},value=${{ needs.semantic-version.outputs.version }}
+            type=raw,value=latest,enable={{is_default_branch}}
+
+      - name: Build and push Docker image
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Create Release
+        if: needs.semantic-version.outputs.released == 'true' && github.ref == 'refs/heads/main'
+        uses: actions/create-release@v1
         env:
-          IMAGE: jyothiram266/doc-semver 
-        run: |
-          docker build -t $IMAGE:$VERSION .
-          docker tag $IMAGE:$VERSION $IMAGE:${MINOR}
-          docker tag $IMAGE:$VERSION $IMAGE:${MAJOR}
-          docker tag $IMAGE:$VERSION $IMAGE:latest
-
-          docker push $IMAGE:$VERSION
-          docker push $IMAGE:${MINOR}
-          docker push $IMAGE:${MAJOR}
-          docker push $IMAGE:latest
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          tag_name: v${{ needs.semantic-version.outputs.version }}
+          release_name: Release v${{ needs.semantic-version.outputs.version }}
+          body: |
+            ## Changes
+            ${{ needs.semantic-version.outputs.changelog }}
+            
+            ## Docker Image
+            ```
+            docker pull ${{ env.IMAGE_NAME }}:${{ needs.semantic-version.outputs.version }}
+            ```
+          draft: false
+          prerelease: false
