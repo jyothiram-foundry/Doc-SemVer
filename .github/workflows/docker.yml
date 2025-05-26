@@ -24,7 +24,7 @@ jobs:
 
       - name: Build and Push Docker Image
         env:
-          IMAGE: jyothiram266/Doc-SemVer 
+          IMAGE: jyothiram266/doc-semver 
         run: |
           docker build -t $IMAGE:$VERSION .
           docker tag $IMAGE:$VERSION $IMAGE:${MINOR}
