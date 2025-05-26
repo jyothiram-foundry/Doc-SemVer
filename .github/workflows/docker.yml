@@ -3,106 +3,185 @@ name: Semantic Docker Build and Push
 on:
   push:
     branches: [ main, master ]
-  pull_request:
-    branches: [ main, master ]
 
 env:
   IMAGE_NAME: jyothiram266/doc-semver
 
 jobs:
-  semantic-version:
+  semantic-version-and-build:
     runs-on: ubuntu-latest
-    outputs:
-      version: ${{ steps.semantic.outputs.new_release_version }}
-      changelog: ${{ steps.semantic.outputs.new_release_notes }}
-      released: ${{ steps.semantic.outputs.new_release_published }}
     
+    permissions:
+      contents: write
+      packages: write
+
     steps:
       - name: Checkout
         uses: actions/checkout@v4
         with:
           fetch-depth: 0
 
-      - name: Semantic Release
-        uses: cycjimmy/semantic-release-action@v4
-        id: semantic
-        with:
-          dry_run: true
-          semantic_version: 19
-        env:
-          TOKEN: ${{ secrets.TOKEN }}
+      - name: Get latest tag
+        id: get_tag
+        run: |
+          # Get the latest tag, default to 0.0.0 if no tags exist
+          LATEST_TAG=$(git describe --tags --abbrev=0 2>/dev/null || echo "0.0.0")
+          echo "latest_tag=$LATEST_TAG" >> $GITHUB_OUTPUT
+          echo "Latest tag: $LATEST_TAG"
 
-  build-and-push:
-    needs: semantic-version
-    runs-on: ubuntu-latest
-    if: needs.semantic-version.outputs.released == 'true' || github.event_name == 'pull_request'
-    
-    permissions:
-      contents: read
-      packages: write
+      - name: Analyze commits for version bump
+        id: version_bump
+        run: |
+          LATEST_TAG="${{ steps.get_tag.outputs.latest_tag }}"
+          
+          # Get commits since last tag
+          if [ "$LATEST_TAG" = "0.0.0" ]; then
+            COMMITS=$(git log --pretty=format:"%s" HEAD)
+          else
+            COMMITS=$(git log --pretty=format:"%s" ${LATEST_TAG}..HEAD)
+          fi
+          
+          echo "Commits to analyze:"
+          echo "$COMMITS"
+          
+          # Initialize version bump type
+          BUMP_TYPE="patch"
+          
+          # Check for breaking changes (major)
+          if echo "$COMMITS" | grep -qE "(BREAKING CHANGE|!:|^[a-zA-Z]+!:)"; then
+            BUMP_TYPE="major"
+          # Check for features (minor)
+          elif echo "$COMMITS" | grep -qE "^feat(\([^)]*\))?:"; then
+            BUMP_TYPE="minor"
+          # Check for fixes (patch) - default
+          elif echo "$COMMITS" | grep -qE "^fix(\([^)]*\))?:"; then
+            BUMP_TYPE="patch"
+          # If no conventional commits found, check for keywords
+          elif echo "$COMMITS" | grep -qiE "(break|breaking|major)"; then
+            BUMP_TYPE="major"
+          elif echo "$COMMITS" | grep -qiE "(feat|feature|add|new)"; then
+            BUMP_TYPE="minor"
+          else
+            BUMP_TYPE="patch"
+          fi
+          
+          echo "bump_type=$BUMP_TYPE" >> $GITHUB_OUTPUT
+          echo "Detected bump type: $BUMP_TYPE"
 
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v4
+      - name: Calculate new version
+        id: new_version
+        run: |
+          LATEST_TAG="${{ steps.get_tag.outputs.latest_tag }}"
+          BUMP_TYPE="${{ steps.version_bump.outputs.bump_type }}"
+          
+          # Remove 'v' prefix if present
+          VERSION=${LATEST_TAG#v}
+          
+          # Split version into parts
+          IFS='.' read -r MAJOR MINOR PATCH <<< "$VERSION"
+          
+          # Ensure we have valid numbers
+          MAJOR=${MAJOR:-0}
+          MINOR=${MINOR:-0}
+          PATCH=${PATCH:-0}
+          
+          # Calculate new version based on bump type
+          case $BUMP_TYPE in
+            "major")
+              NEW_MAJOR=$((MAJOR + 1))
+              NEW_MINOR=0
+              NEW_PATCH=0
+              ;;
+            "minor")
+              NEW_MAJOR=$MAJOR
+              NEW_MINOR=$((MINOR + 1))
+              NEW_PATCH=0
+              ;;
+            "patch")
+              NEW_MAJOR=$MAJOR
+              NEW_MINOR=$MINOR
+              NEW_PATCH=$((PATCH + 1))
+              ;;
+          esac
+          
+          NEW_VERSION="$NEW_MAJOR.$NEW_MINOR.$NEW_PATCH"
+          
+          echo "new_version=$NEW_VERSION" >> $GITHUB_OUTPUT
+          echo "Previous version: $LATEST_TAG"
+          echo "New version: $NEW_VERSION"
+          echo "Bump type: $BUMP_TYPE"
 
       - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v3.8.0
+        uses: docker/setup-buildx-action@v3
 
       - name: Log in to Docker Hub
-        uses: docker/login-action@v3.3.0
+        uses: docker/login-action@v3
         with:
           username: ${{ secrets.DOCKER_USERNAME }}
           password: ${{ secrets.DOCKER_PASSWORD }}
-        continue-on-error: false
-        timeout-minutes: 5
-
-      - name: Fallback Docker Login
-        if: failure()
-        run: |
-          echo "${{ secrets.DOCKER_PASSWORD }}" | docker login -u "${{ secrets.DOCKERHUB_USERNAME }}" --password-stdin
-
-      - name: Extract metadata
-        id: meta
-        uses: docker/metadata-action@v5
-        with:
-          images: ${{ env.IMAGE_NAME }}
-          tags: |
-            type=ref,event=branch
-            type=ref,event=pr
-            type=raw,value=${{ needs.semantic-version.outputs.version }},enable=${{ needs.semantic-version.outputs.released == 'true' }}
-            type=raw,value=latest,enable={{is_default_branch}}
-          labels: |
-            org.opencontainers.image.title=${{ github.event.repository.name }}
-            org.opencontainers.image.description=${{ github.event.repository.description }}
-            org.opencontainers.image.version=${{ needs.semantic-version.outputs.version }}
-            org.opencontainers.image.revision=${{ github.sha }}
 
       - name: Build and push Docker image
         uses: docker/build-push-action@v5
         with:
           context: .
           push: true
-          tags: ${{ steps.meta.outputs.tags }}
-          labels: ${{ steps.meta.outputs.labels }}
+          tags: |
+            ${{ env.IMAGE_NAME }}:${{ steps.new_version.outputs.new_version }}
+            ${{ env.IMAGE_NAME }}:latest
+          labels: |
+            org.opencontainers.image.version=${{ steps.new_version.outputs.new_version }}
+            org.opencontainers.image.revision=${{ github.sha }}
+            org.opencontainers.image.created=${{ github.event.head_commit.timestamp }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
 
+      - name: Create Git tag
+        run: |
+          NEW_VERSION="${{ steps.new_version.outputs.new_version }}"
+          git config user.name github-actions
+          git config user.email github-actions@github.com
+          git tag "v$NEW_VERSION"
+          git push origin "v$NEW_VERSION"
+
+      - name: Generate changelog
+        id: changelog
+        run: |
+          LATEST_TAG="${{ steps.get_tag.outputs.latest_tag }}"
+          NEW_VERSION="${{ steps.new_version.outputs.new_version }}"
+          BUMP_TYPE="${{ steps.version_bump.outputs.bump_type }}"
+          
+          # Get commits since last tag for changelog
+          if [ "$LATEST_TAG" = "0.0.0" ]; then
+            COMMITS=$(git log --pretty=format:"- %s (%h)" HEAD)
+          else
+            COMMITS=$(git log --pretty=format:"- %s (%h)" ${LATEST_TAG}..HEAD)
+          fi
+          
+          # Create changelog
+          CHANGELOG="## Changes
+
+This release includes a $BUMP_TYPE version bump.
+**Reason:** $(echo $BUMP_TYPE | sed 's/patch/Bug fixes detected/;s/minor/New features added/;s/major/Breaking changes introduced/')
+
+### Commits included in this release:
+
+$COMMITS
+
+**Docker Images:**
+- \`${{ env.IMAGE_NAME }}:$NEW_VERSION\`
+- \`${{ env.IMAGE_NAME }}:latest\`"
+          
+          # Save changelog to file for multiline output
+          echo "$CHANGELOG" > changelog.txt
+          echo "changelog_file=changelog.txt" >> $GITHUB_OUTPUT
+
       - name: Create Release
-        if: needs.semantic-version.outputs.released == 'true' && github.ref == 'refs/heads/main'
         uses: actions/create-release@v1
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         with:
-          tag_name: v${{ needs.semantic-version.outputs.version }}
-          release_name: Release v${{ needs.semantic-version.outputs.version }}
-          body: |
-            ## Changes
-            ${{ needs.semantic-version.outputs.changelog }}
-            
-            ## Docker Image
-            ```
-            docker pull ${{ env.IMAGE_NAME }}:${{ needs.semantic-version.outputs.version }}
-            docker pull ${{ env.IMAGE_NAME }}:latest
-            ```
+          tag_name: v${{ steps.new_version.outputs.new_version }}
+          release_name: Release v${{ steps.new_version.outputs.new_version }}
+          body_path: changelog.txt
           draft: false
           prerelease: false
