@@ -44,65 +44,54 @@ jobs:
           echo "Commits to analyze:"
           echo "$COMMITS"
           
-          # Count total commits
-          COMMIT_COUNT=$(echo "$COMMITS" | wc -l)
-          echo "Total commits: $COMMIT_COUNT"
+          # Initialize flags for different types of changes
+          HAS_BREAKING=false
+          HAS_FEATURE=false
+          HAS_FIX=false
           
-          # Initialize version bump type
-          BUMP_TYPE="patch"
-          
-          # Enhanced logic to prefer major bumps with many commits
-          # Check for explicit breaking changes first (highest priority)
+          # Check for breaking changes (major) - highest priority
           if echo "$COMMITS" | grep -qE "(BREAKING CHANGE|!:|^[a-zA-Z]+!:)"; then
+            HAS_BREAKING=true
+          fi
+          
+          # Also check for keyword-based breaking changes
+          if echo "$COMMITS" | grep -qiE "(break|breaking|major)"; then
+            HAS_BREAKING=true
+          fi
+          
+          # Check for features (minor)
+          if echo "$COMMITS" | grep -qE "^feat(\([^)]*\))?:"; then
+            HAS_FEATURE=true
+          fi
+          
+          # Also check for keyword-based features
+          if echo "$COMMITS" | grep -qiE "(feat|feature|add|new)"; then
+            HAS_FEATURE=true
+          fi
+          
+          # Check for fixes (patch)
+          if echo "$COMMITS" | grep -qE "^fix(\([^)]*\))?:"; then
+            HAS_FIX=true
+          fi
+          
+          # Determine bump type based on priority (major > minor > patch)
+          if [ "$HAS_BREAKING" = true ]; then
             BUMP_TYPE="major"
-            echo "Found explicit breaking changes"
-          # If many commits (>10), prefer major bump for significant changes
-          elif [ "$COMMIT_COUNT" -gt 10 ]; then
-            # Look for any indication of major changes
-            if echo "$COMMITS" | grep -qiE "(break|breaking|major|refactor|restructure|rewrite|overhaul|redesign)"; then
-              BUMP_TYPE="major"
-              echo "Many commits detected ($COMMIT_COUNT) with major change indicators"
-            # Even without explicit major indicators, if there are many diverse changes, consider major
-            elif echo "$COMMITS" | grep -qE "^feat(\([^)]*\))?:" && echo "$COMMITS" | grep -qE "^fix(\([^)]*\))?:"; then
-              BUMP_TYPE="major"
-              echo "Many commits detected ($COMMIT_COUNT) with mixed features and fixes - treating as major"
-            else
-              BUMP_TYPE="minor"
-              echo "Many commits detected ($COMMIT_COUNT) - bumping to minor"
-            fi
-          # If moderate number of commits (5-10), be more aggressive about major
-          elif [ "$COMMIT_COUNT" -gt 5 ]; then
-            if echo "$COMMITS" | grep -qiE "(break|breaking|major|refactor|restructure)"; then
-              BUMP_TYPE="major"
-              echo "Moderate commits with major indicators"
-            elif echo "$COMMITS" | grep -qE "^feat(\([^)]*\))?:"; then
-              BUMP_TYPE="minor"
-              echo "Moderate commits with features"
-            else
-              BUMP_TYPE="patch"
-              echo "Moderate commits - patch bump"
-            fi
-          # Standard conventional commit logic for fewer commits
+            echo "🚨 Breaking changes detected - MAJOR version bump"
+          elif [ "$HAS_FEATURE" = true ]; then
+            BUMP_TYPE="minor"
+            echo "✨ New features detected - MINOR version bump"
+          elif [ "$HAS_FIX" = true ]; then
+            BUMP_TYPE="patch"
+            echo "🐛 Bug fixes detected - PATCH version bump"
           else
-            # Check for features (minor)
-            if echo "$COMMITS" | grep -qE "^feat(\([^)]*\))?:"; then
-              BUMP_TYPE="minor"
-            # Check for fixes (patch)
-            elif echo "$COMMITS" | grep -qE "^fix(\([^)]*\))?:"; then
-              BUMP_TYPE="patch"
-            # Check for keyword-based major changes
-            elif echo "$COMMITS" | grep -qiE "(break|breaking|major)"; then
-              BUMP_TYPE="major"
-            # Check for keyword-based minor changes
-            elif echo "$COMMITS" | grep -qiE "(feat|feature|add|new)"; then
-              BUMP_TYPE="minor"
-            else
-              BUMP_TYPE="patch"
-            fi
+            # Default to patch if no conventional commits found
+            BUMP_TYPE="patch"
+            echo "📦 No specific change type detected - defaulting to PATCH version bump"
           fi
           
           echo "bump_type=$BUMP_TYPE" >> $GITHUB_OUTPUT
-          echo "Final detected bump type: $BUMP_TYPE"
+          echo "Final bump type: $BUMP_TYPE"
 
       - name: Calculate new version
         id: new_version
@@ -189,36 +178,22 @@ jobs:
           # Get commits since last tag for changelog
           if [ "$LATEST_TAG" = "0.0.0" ]; then
             COMMITS=$(git log --pretty=format:"- %s (%h)" HEAD)
-            COMMIT_COUNT=$(git log --oneline HEAD | wc -l)
           else
             COMMITS=$(git log --pretty=format:"- %s (%h)" ${LATEST_TAG}..HEAD)
-            COMMIT_COUNT=$(git log --oneline ${LATEST_TAG}..HEAD | wc -l)
           fi
           
-          # Determine reason based on bump type and commit count
+          # Determine reason based on bump type
           case $BUMP_TYPE in
-            "patch") REASON="Bug fixes and minor changes detected" ;;
-            "minor") 
-              if [ "$COMMIT_COUNT" -gt 10 ]; then
-                REASON="Multiple new features and changes ($COMMIT_COUNT commits)"
-              else
-                REASON="New features added"
-              fi
-              ;;
-            "major") 
-              if [ "$COMMIT_COUNT" -gt 10 ]; then
-                REASON="Significant changes with $COMMIT_COUNT commits - major version bump"
-              else
-                REASON="Breaking changes or major features introduced"
-              fi
-              ;;
+            "patch") REASON="Bug fixes detected" ;;
+            "minor") REASON="New features added" ;;
+            "major") REASON="Breaking changes introduced" ;;
           esac
           
           # Create changelog file
           cat > changelog.txt << EOF
           ## Changes
           
-          This release includes a **$BUMP_TYPE** version bump ($COMMIT_COUNT commits).
+          This release includes a $BUMP_TYPE version bump.
           **Reason:** $REASON
           
           ### Commits included in this release:
