@@ -157,22 +157,29 @@ jobs:
             COMMITS=$(git log --pretty=format:"- %s (%h)" ${LATEST_TAG}..HEAD)
           fi
           
-          # Create changelog
-          CHANGELOG="## Changes
-
-This release includes a $BUMP_TYPE version bump.
-**Reason:** $(echo $BUMP_TYPE | sed 's/patch/Bug fixes detected/;s/minor/New features added/;s/major/Breaking changes introduced/')
-
-### Commits included in this release:
-
-$COMMITS
-
-**Docker Images:**
-- \`${{ env.IMAGE_NAME }}:$NEW_VERSION\`
-- \`${{ env.IMAGE_NAME }}:latest\`"
+          # Determine reason based on bump type
+          case $BUMP_TYPE in
+            "patch") REASON="Bug fixes detected" ;;
+            "minor") REASON="New features added" ;;
+            "major") REASON="Breaking changes introduced" ;;
+          esac
           
-          # Save changelog to file for multiline output
-          echo "$CHANGELOG" > changelog.txt
+          # Create changelog file
+          cat > changelog.txt << EOF
+          ## Changes
+          
+          This release includes a $BUMP_TYPE version bump.
+          **Reason:** $REASON
+          
+          ### Commits included in this release:
+          
+          $COMMITS
+          
+          **Docker Images:**
+          - \`${{ env.IMAGE_NAME }}:$NEW_VERSION\`
+          - \`${{ env.IMAGE_NAME }}:latest\`
+          EOF
+          
           echo "changelog_file=changelog.txt" >> $GITHUB_OUTPUT
 
       - name: Create Release
