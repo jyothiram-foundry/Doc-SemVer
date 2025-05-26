@@ -12,7 +12,7 @@ on:
       - main
 
 env:
-  REGISTRY: ghcr.io
+  REGISTRY: docker.io
   IMAGE_NAME: jyothiram266/doc-semver
 
 jobs:
