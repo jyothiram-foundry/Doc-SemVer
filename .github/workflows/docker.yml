@@ -1,4 +1,4 @@
-name: Semantic Docker Build and Push
+name: Semantic Docker Build and Push with Detailed Release Notes
 
 on:
   push:
@@ -168,52 +168,223 @@ jobs:
           git tag "v$NEW_VERSION"
           git push origin "v$NEW_VERSION"
 
-      - name: Generate changelog
-        id: changelog
+      - name: Generate detailed release notes
+        id: release_notes
         run: |
           LATEST_TAG="${{ steps.get_tag.outputs.latest_tag }}"
           NEW_VERSION="${{ steps.new_version.outputs.new_version }}"
           BUMP_TYPE="${{ steps.version_bump.outputs.bump_type }}"
           
-          # Get commits since last tag for changelog
+          # Get commit data with more details
           if [ "$LATEST_TAG" = "0.0.0" ]; then
-            COMMITS=$(git log --pretty=format:"- %s (%h)" HEAD)
+            RAW_COMMITS=$(git log --pretty=format:"%H|%s|%an|%ad|%b" --date=short HEAD)
           else
-            COMMITS=$(git log --pretty=format:"- %s (%h)" ${LATEST_TAG}..HEAD)
+            RAW_COMMITS=$(git log --pretty=format:"%H|%s|%an|%ad|%b" --date=short ${LATEST_TAG}..HEAD)
           fi
           
-          # Determine reason based on bump type
+          # Initialize arrays for different commit types
+          BREAKING_CHANGES=""
+          FEATURES=""
+          FIXES=""
+          DOCS=""
+          CHORES=""
+          OTHER=""
+          
+          # Process each commit
+          while IFS='|' read -r hash subject author date body; do
+            if [ -z "$hash" ]; then continue; fi
+            
+            # Create commit entry with author and date
+            COMMIT_ENTRY="- **${subject}** by @${author} on ${date} ([${hash:0:7}](https://github.com/${{ github.repository }}/commit/${hash}))"
+            
+            # Add body if it exists and is not empty
+            if [ ! -z "$body" ] && [ "$body" != " " ]; then
+              COMMIT_ENTRY="${COMMIT_ENTRY}
+                > ${body}"
+            fi
+            
+            # Categorize commits
+            if echo "$subject" | grep -qE "(BREAKING CHANGE|!:|^[a-zA-Z]+!:)" || echo "$subject $body" | grep -qiE "(break|breaking|major)"; then
+              BREAKING_CHANGES="${BREAKING_CHANGES}${COMMIT_ENTRY}
+          "
+            elif echo "$subject" | grep -qE "^feat(\([^)]*\))?:" || echo "$subject" | grep -qiE "(feat|feature|add|new)"; then
+              FEATURES="${FEATURES}${COMMIT_ENTRY}
+          "
+            elif echo "$subject" | grep -qE "^fix(\([^)]*\))?:" || echo "$subject" | grep -qiE "(fix|bug)"; then
+              FIXES="${FIXES}${COMMIT_ENTRY}
+          "
+            elif echo "$subject" | grep -qE "^docs?(\([^)]*\))?:" || echo "$subject" | grep -qiE "(doc|documentation|readme)"; then
+              DOCS="${DOCS}${COMMIT_ENTRY}
+          "
+            elif echo "$subject" | grep -qE "^(chore|ci|build|test)(\([^)]*\))?:" || echo "$subject" | grep -qiE "(chore|maintenance|deps|dependencies)"; then
+              CHORES="${CHORES}${COMMIT_ENTRY}
+          "
+            else
+              OTHER="${OTHER}${COMMIT_ENTRY}
+          "
+            fi
+          done <<< "$RAW_COMMITS"
+          
+          # Get release statistics
+          TOTAL_COMMITS=$(echo "$RAW_COMMITS" | grep -v '^$' | wc -l)
+          CONTRIBUTORS=$(git log --pretty=format:"%an" ${LATEST_TAG}..HEAD 2>/dev/null | sort | uniq | wc -l)
+          if [ "$LATEST_TAG" = "0.0.0" ]; then
+            CONTRIBUTORS=$(git log --pretty=format:"%an" HEAD | sort | uniq | wc -l)
+          fi
+          
+          # Get files changed
+          if [ "$LATEST_TAG" = "0.0.0" ]; then
+            FILES_CHANGED=$(git diff --name-only HEAD~${TOTAL_COMMITS} HEAD 2>/dev/null | wc -l || echo "0")
+          else
+            FILES_CHANGED=$(git diff --name-only ${LATEST_TAG}..HEAD 2>/dev/null | wc -l || echo "0")
+          fi
+          
+          # Determine version impact and description
           case $BUMP_TYPE in
-            "patch") REASON="Bug fixes detected" ;;
-            "minor") REASON="New features added" ;;
-            "major") REASON="Breaking changes introduced" ;;
+            "major")
+              VERSION_IMPACT="🚨 **MAJOR RELEASE**"
+              VERSION_DESC="This release contains **breaking changes** that may require updates to your implementation."
+              ;;
+            "minor")
+              VERSION_IMPACT="✨ **MINOR RELEASE**"
+              VERSION_DESC="This release introduces new features while maintaining backward compatibility."
+              ;;
+            "patch")
+              VERSION_IMPACT="🐛 **PATCH RELEASE**"
+              VERSION_DESC="This release contains bug fixes and improvements."
+              ;;
           esac
           
-          # Create changelog file
-          cat > changelog.txt << EOF
-          ## Changes
+          # Generate Docker pull commands
+          DOCKER_COMMANDS="
+          \`\`\`bash
+          # Pull the latest version
+          docker pull ${{ env.IMAGE_NAME }}:${NEW_VERSION}
           
-          This release includes a $BUMP_TYPE version bump.
-          **Reason:** $REASON
+          # Or pull the latest tag
+          docker pull ${{ env.IMAGE_NAME }}:latest
+          \`\`\`"
           
-          ### Commits included in this release:
+          # Create comprehensive release notes
+          cat > release_notes.md << EOF
+          ${VERSION_IMPACT}
           
-          $COMMITS
+          ${VERSION_DESC}
           
-          **Docker Images:**
-          - \`${{ env.IMAGE_NAME }}:$NEW_VERSION\`
-          - \`${{ env.IMAGE_NAME }}:latest\`
+          ## 📊 Release Summary
+          
+          | Metric | Value |
+          |--------|-------|
+          | **Version** | \`v${NEW_VERSION}\` |
+          | **Previous Version** | \`${LATEST_TAG}\` |
+          | **Release Type** | ${BUMP_TYPE^} |
+          | **Total Commits** | ${TOTAL_COMMITS} |
+          | **Contributors** | ${CONTRIBUTORS} |
+          | **Files Changed** | ${FILES_CHANGED} |
+          | **Release Date** | $(date '+%B %d, %Y') |
+          
+          ## 🐳 Docker Images
+          
+          This release is available as Docker images:
+          
+          - \`${{ env.IMAGE_NAME }}:${NEW_VERSION}\` - Specific version
+          - \`${{ env.IMAGE_NAME }}:latest\` - Latest release
+          
+          ### Quick Start
+          ${DOCKER_COMMANDS}
+          
+          ## 📝 What's Changed
+          
           EOF
           
-          echo "changelog_file=changelog.txt" >> $GITHUB_OUTPUT
+          # Add sections based on what changes exist
+          if [ ! -z "$BREAKING_CHANGES" ]; then
+            cat >> release_notes.md << EOF
+          ### 🚨 Breaking Changes
+          
+          ${BREAKING_CHANGES}
+          EOF
+          fi
+          
+          if [ ! -z "$FEATURES" ]; then
+            cat >> release_notes.md << EOF
+          ### ✨ New Features
+          
+          ${FEATURES}
+          EOF
+          fi
+          
+          if [ ! -z "$FIXES" ]; then
+            cat >> release_notes.md << EOF
+          ### 🐛 Bug Fixes
+          
+          ${FIXES}
+          EOF
+          fi
+          
+          if [ ! -z "$DOCS" ]; then
+            cat >> release_notes.md << EOF
+          ### 📚 Documentation
+          
+          ${DOCS}
+          EOF
+          fi
+          
+          if [ ! -z "$CHORES" ]; then
+            cat >> release_notes.md << EOF
+          ### 🔧 Maintenance & Dependencies
+          
+          ${CHORES}
+          EOF
+          fi
+          
+          if [ ! -z "$OTHER" ]; then
+            cat >> release_notes.md << EOF
+          ### 📦 Other Changes
+          
+          ${OTHER}
+          EOF
+          fi
+          
+          # Add footer with additional information
+          cat >> release_notes.md << EOF
+          
+          ## 🔗 Links
+          
+          - **Docker Hub**: [${IMAGE_NAME}](https://hub.docker.com/r/${IMAGE_NAME})
+          - **Source Code**: [v${NEW_VERSION}](https://github.com/${{ github.repository }}/tree/v${NEW_VERSION})
+          - **Compare Changes**: [${LATEST_TAG}...v${NEW_VERSION}](https://github.com/${{ github.repository }}/compare/${LATEST_TAG}...v${NEW_VERSION})
+          
+          ## 💬 Feedback
+          
+          If you encounter any issues with this release, please [open an issue](https://github.com/${{ github.repository }}/issues/new) on GitHub.
+          
+          ---
+          
+          **Full Changelog**: https://github.com/${{ github.repository }}/compare/${LATEST_TAG}...v${NEW_VERSION}
+          EOF
+          
+          echo "release_notes_file=release_notes.md" >> $GITHUB_OUTPUT
+          
+          # Preview the release notes in the action log
+          echo "=== GENERATED RELEASE NOTES ==="
+          cat release_notes.md
+          echo "==============================="
 
-      - name: Create Release
+      - name: Create Release with Detailed Notes
         uses: actions/create-release@v1
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         with:
           tag_name: v${{ steps.new_version.outputs.new_version }}
-          release_name: Release v${{ steps.new_version.outputs.new_version }}
-          body_path: changelog.txt
+          release_name: "🚀 Release v${{ steps.new_version.outputs.new_version }}"
+          body_path: release_notes.md
           draft: false
           prerelease: false
+
+      - name: Upload release notes as artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-notes-v${{ steps.new_version.outputs.new_version }}
+          path: release_notes.md
+          retention-days: 90
