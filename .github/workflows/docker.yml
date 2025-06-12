@@ -50,27 +50,20 @@ jobs:
           HAS_FIX=false
           
           # Check for breaking changes (major) - highest priority
-          if echo "$COMMITS" | grep -qE "(BREAKING CHANGE|!:|^[a-zA-Z]+!:)"; then
+          if echo "$COMMITS" | grep -qE "(major:|!:|^[a-zA-Z]+!:)"; then
             HAS_BREAKING=true
           fi
           
-          # Also check for keyword-based breaking changes
-          if echo "$COMMITS" | grep -qiE "(break|breaking|major)"; then
-            HAS_BREAKING=true
-          fi
+
           
           # Check for features (minor)
-          if echo "$COMMITS" | grep -qE "^feat(\([^)]*\))?:"; then
+          if echo "$COMMITS" | grep -qE "^minor:(\([^)]*\))?:"; then
             HAS_FEATURE=true
           fi
           
-          # Also check for keyword-based features
-          if echo "$COMMITS" | grep -qiE "(feat|feature|add|new)"; then
-            HAS_FEATURE=true
-          fi
           
           # Check for fixes (patch)
-          if echo "$COMMITS" | grep -qE "^fix(\([^)]*\))?:"; then
+          if echo "$COMMITS" | grep -qE "^patch:(\([^)]*\))?:"; then
             HAS_FIX=true
           fi
           
